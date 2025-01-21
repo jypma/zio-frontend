@@ -1,0 +1,380 @@
+#+TITLE: Full-stack functional effect systems
+#+PROPERTY: header-args:plantuml :exports results :var _dpi_="150"
+#+options: H:3
+#+latex_header: \hypersetup{colorlinks=true,linkcolor=blue}
+#+LATEX_CLASS_OPTIONS: [8pt]
+#+EXCLUDE_TAGS: comment
+
+* Introduction
+** Agenda
+
+- Many thanks to [[https://laminar.dev/][Laminar]], the awesome (Scala but non-ZIO) frontend framework that inspired this work.
+** Evaluating language and framework alternatives
+- Subjective maintainability concerns
+  * Discoverability
+  * Composability
+  * Concurrency
+
+- Cross-cutting concerns
+  * Handling of dependencies
+  * Guarantees regarding resource safety
+  * Error visibility, handling and retry
+
+* Prelude: type algebra
+
+** Unit type
+/The type that is a supertype of all other types/
+
+- Java (partially): =void= (but only as keyword, the =Void= type is problematic)
+- Typescript: =void=
+- Scala, Kotlin: =Unit=
+- Exactly one value exists for this type
+- Used to mark methods that only return, without any additional information
+
+** Nothing type ("Bottom" type)
+/The type that is a subtype of all other types/
+
+- Scala 3, Kotlin: =Nothing=, Typescript: =never=
+- No values exist for this type
+- Used to mark methods that are guaranteed never to return
+#+BEGIN_SRC scala
+def notImplemented: Nothing = throw new RuntimeException("Not yet implemented!")
+
+def theAnswerToLifeTheUniverseAndEverything: Int = {
+  notImplemented
+}
+#+END_SRC
+
+** Union types
+/The collection of objects that have either type/ =A= /or type/ =B= /(or both)/
+
+- Scala 3 and Typescript: =A | B=
+- No syntax exists for this in Java (or Kotlin)
+- The concept exists though:
+#+BEGIN_SRC java
+public void readStuff() throws IOException;
+public void hangOut() throws InterruptedException();
+
+public void unfortunateMethod() throws IOException, InterruptedException { // <-- Union type
+    hangOut();
+    readStuff();
+}
+#+END_SRC
+- Nice properties, e.g.:
+  + =(A | B) | C= is the same as =(A | C) | B=
+  + =(A | A)= is just =A=
+  + =(A | Nothing)= is =A= 
+
+** Intersection types
+/The collection of objects that have both type/ =A= /and type/ =B=
+
+- Scala 3 and Typescript: =A & B=
+- No direct syntax exists for this in Java (or Kotlin)
+- Can be expressed as a generic type bound (but only extending concrete types)
+#+BEGIN_SRC java
+interface Edible {}
+interface Fruit {}
+public void <T extends Edible & Fruit> eat(T tasty) {}
+#+END_SRC
+- Similarly nice properties, e.g.
+  + =(A & B) | C= is the same as =(A & C) & B=
+  + =(A & A)= is just =A=
+  + =(A & Any)= is =A=
+
+* Computations as values
+** Introduction
+- /Functional/ programming deals with functions as first-class citizens
+- Lets try to define a computation (a function) as a value
+  * Calculates some result =A= (...eventually)
+
+In psuedo-Java, our definition might look like
+#+BEGIN_SRC java
+/** A computation that eventually results in a value, when launched */
+interface Comp<A> {
+    CompletionStage<A> go();
+}
+#+END_SRC
+
+** Function transformation
+Given that we now have a
+#+BEGIN_SRC java
+Comp<Int> createUserInDB = /* ... */ ;
+#+END_SRC
+
+We can define methods on =Comp= that create new functions which augment the behavior, e.g.
+#+BEGIN_SRC java
+Comp<Int> create3Users = createUserInDB.repeat(3);
+Comp<Int> waitAndThenCreateUser = createUserInDB.delay(1000);
+Comp<Int> createUsersSlowly = createUserInDB.delay(1000).repeat(5);
+#+END_SRC
+
+** Dependencies
+- Let's extend our definition so it can use some dependencies
+  * Depends on some input type =R=
+#+BEGIN_SRC java
+interface Comp<R,A> {
+    CompletionStage<A> go(R dependencies);
+}
+#+END_SRC
+
+- No dependencies? Use =Any= (Scala equivalent of =java.lang.Object=)
+- Multiple dependencies? Use =R1 & R2= (and some trickery, see ZIO)
+
+** Errors
+- We can define 3 kinds of errors:
+  * (A) Expected failure scenarios (e.g. data didn't validate, or a remote server can't be reached)
+  * (B) Unexpected defects (e.g. division by zero, null pointer)
+  * (C) Fatal errors (e.g. we've ran out of memory)
+
+- Let's model expected failures as an explicit type =E=, and keep defects as (unchecked) exceptions.
+#+BEGIN_SRC java
+interface Comp<R,E,A> {
+    CompletionStage<Either<E,A>> go(R dependencies);
+}
+#+END_SRC
+- No expected failure? Use =Nothing= type
+
+- Define methods on =Comp= that handle (expected) failure:
+#+BEGIN_SRC java
+Comp<Any,DBError,User> fetchUser = getUser(42);
+Comp<Any,Nothing,User> fetchOrDefault = fetchUser.catchAll(error -> createDefaultUser());
+#+END_SRC
+
+** Chaining our function type
+Given our
+#+BEGIN_SRC java
+Comp<DBConnection,DBError,Int> createUserInDB = /* ... */ ;
+#+END_SRC
+
+What if we want to run some code as a result of that =Int=, which is to return another =Comp= ?
+#+BEGIN_SRC java
+Comp<MailConnection,Nothing,Unit> sendSystemMail(String message);
+
+var res = createUserInDB.flatMap(result -> sendSystemMail("Created user nr. " + result));
+#+END_SRC
+
+What is the expected type for =res='s generic parameters?
+- /Dependency/: A =DBConnection= and a =MailConnection=, so =DBConnection & MailConnection=
+- /Error/: Either =DBError= or =Nothing=, so =DBError | Nothing=, which simplifies to =DBError=
+- /Result/: =Unit=
+
+For these type calculations, we have to leave Java behind.
+** Introducing the ZIO type
+#+BEGIN_SRC scala
+/** Some example methods in the ZIO trait (with similified signatures) */
+trait ZIO[-R, +E, +A] {
+  def repeat(N: Int): ZIO[R, E, A]
+  def delay(d: Duration): ZIO[R, E, A]
+  def catchAll[R2, E2](fn: E => ZIO[R2, E2, A]): ZIO[R & R2, E2, A]
+  def provide(deps: ZLayer[R]): ZIO[Any, E, A]
+}
+#+END_SRC
+
+Advantages of using Scala (beyond what we've seen):
+- Type aliases, e.g. 
+#+BEGIN_SRC scala
+/** A ZIO that is guaranteed to never fail, and has no dependencies */
+type UIO[+A] = ZIO[Any, Nothing, A];
+
+/** A ZIO that has no dependencies */
+type IO[+E, +A] = ZIO[Any, E, A];
+#+END_SRC
+- For comprehension over =map=, =flatMap= and =filter=
+
+** Other parts of ZIO
+Besides the =ZIO= type to chain computations and their effects, the ZIO framework also provides
+- Concurrency through the =Fiber= type and =fork= method on =ZIO=
+- Resource safety using the =Scope= type (as a dependency)
+- Reactive streams using the =ZStream= type
+- Concurrency primitives like queues, semaphores, and atomically mutable references
+  + =SubscriptionRef= stores a value, with the ability to get a =ZStream= of changes to it
+
+** Resource safety: Scope
+- We want to make sure that resources are closed after they're done being used
+- /If only we could express that an effect should only run when these dependencies are met.../
+
+#+BEGIN_SRC scala
+trait zio.Scope { /* ... */ }
+
+object ZIO {
+  def acquireRelease[R, E, A](acquire: ZIO[R, E, A])(release: A => ZIO[R, Nothing, Any]): ZIO[R & Scope, E, A]
+
+  def scoped[R, E, A](zio: ZIO[Scope & R, E, A]): ZIO[R, E, A]
+}
+#+END_SRC
+
+We can now declare =Scope= as a dependency to state that a =ZIO= requires scope handling and cleanup after it's been run, e.g.:
+
+#+BEGIN_SRC scala
+ZIO.scoped {
+  openFile(name).flatMap(useFile)
+}
+#+END_SRC
+
+However, since =Scope= is a normal type, we can explicitly use it like we would any other dependency.
+
+* Moving into front-end land
+** Introduction
+Let's build a frontend framework. What do we need?
+- A building block to define modifications we want to make to the DOM tree
+  + Adding (and removing?) elements
+  + Adding event handlers
+- Nice ways to integrate non-UI functionality in the same framework
+  + REST requests
+  + Web sockets
+  + IndexedDB storage
+
+We have the following available:
+- ScalaJS, which cross-compiles Scala to Javascript (allowing us full and direct JS and DOM access)
+- ZIO, the whole library compiles fine under ScalaJS
+** The not-so-virtual DOM
+- Once upon a time. there was the DOM (/document object model/)
+  + Contains all the pretty =<div>=, and how they're centered
+- Generally good idea: let's make UI state a pure function from our application state
+  + =ApplicationState -> HTML=
+  + Replacing large parts of HTML with the same HTML makes rendering slow
+  + DOM updates /themselves/ are not slow
+- Solution (=react=, =vue=, ...): Render to a "virtual" DOM, and only apply differences
+  + Leaky: there's state inside those HTML components (e.g. input, focus, ...)
+- Let's instead try to just not update what we're not changing
+** Our building block
+Let's define an operation that can perform a change at a certain point (parent) in the DOM tree.
+- We'll call it =Modifier= (since it modifies its parent)
+- It needs a parent (of type =org.scalajs.dom.Element=)
+- It might be creating a new child element of some type =T=
+- We need to be able to clean it up, so let's give it a =Scope= as dependency
+#+BEGIN_SRC scala
+case class MountPoint(parent: dom.Element)
+
+type Modifier[+T] = ZIO[MountPoint & Scope, Nothing, T]
+#+END_SRC
+
+- *NOTE*: We're optimistically stating that all modifiers never fail (=Nothing=). This may come back to bite us.
+** Creating an element DSL
+Using Scala's syntax where =obj(foo)= is a shorthand for =obj.apply(foo)=, we can build a DSL to create HTML through =Modifier= :
+
+#+BEGIN_SRC scala
+case class CreateFn[T](name: String) {
+  /** Returns a Modifier that creates a HTML element on its parent with the given children, removing it when it goes out of scope. */
+  def apply(children: Modifier[_]*): Modifier[E] = /* ... */
+}
+val div = CreateFn[dom.HTMLElement]("div")
+val input = CreateFn[dom.HTMLInputElement]("input")
+
+div(
+  div(
+    input(),
+    input()
+  )
+)
+#+END_SRC
+
+** Adding attributes
+Elements without attributes are rather boring, so let's add those.
+
+#+BEGIN_SRC scala
+case class Attribute(name: String) {
+  /** Returns a modifier that sets this attribute to the given value on the parent. */
+  def :=(value: String): Modifier[Unit] = /* ... */
+}
+val title = Attribute("title")
+val typ = Attribute("type")
+
+div(
+  div(
+    input(typ := "button", title := "OK"),
+    input(typ := "button", title := "Cancel")
+  )
+)
+#+END_SRC
+
+** Event handlers
+To make our applications interactive, we want to be able to run a =ZIO= when an event occurs for a DOM element.
+
+#+BEGIN_SRC scala
+case class EventsEmitter[E <: dom.Event, +T](name:String /*, ... */) {
+  def apply[U](op: ZIO[Scope, Nothing, T] => ZIO[Scope, Nothing, U]): EventsEmitter[E,U] = /* ... */
+}
+val onClick = EventsEmitter[dom.MouseEvent]("click")
+
+div(
+  div(
+    input(typ := "button", title := "OK", onClick(_.map(ev => println(ev))),
+    input(typ := "button", title := "Cancel")
+  )
+)
+#+END_SRC
+
+- We can similarly define events as a =ZStream=, which is also available.
+
+** Dynamic attributes
+Now that events can affect our application, let's introduce a way to have our attributes change value. =ZStream= fits this nicely.
+#+BEGIN_SRC scala
+type Consumeable[T] = ZStream[Scope, Nothing, T]
+
+case class Attribute(name: String) {
+  /** Returns a Modifier that will read from the given consumeable when mounted, stopping when it goes out of scope. */
+  def <--(content: Consumeable[String]) = /* ... */
+}
+#+END_SRC
+
+With this, we can have attributes follow any =ZStream=, e.g. to display the latest value of a =SubscriptionRef=.
+
+#+BEGIN_SRC scala
+val message: SubscriptionRef[Message] = /* ... */
+
+div(
+  textContent <-- message.map(m => "Message: " + m.content)
+)
+#+END_SRC
+
+* Cross-cutting concerns
+** Dependencies
+*** Description
+Dependencies is ...
+*** Java: Function parameters
+#+BEGIN_SRC java
+User[] loadUsers(String city, DatabaseConnection conn);
+void sendMail(User user, String message, MailProvider mail);
+
+void sendMailToUsersIn(String city, String message, DatabaseConnection conn, MailProvider mail);
+#+END_SRC
+
+*** Java: Constructor parameters
+#+BEGIN_SRC java
+record UserDB(DatabaseConnection conn) {
+    User[] loadUsers(String city);
+}
+
+record MailerService(MailProvider mail) {
+    void sendMail(User user, String message);
+}
+
+record MarketingService(UserDB users, MailerService mailer) {
+    void sendMailToUsersIn(String city, String message);
+}
+#+END_SRC
+
+Composability
+
+#+BEGIN_SRC java
+var userDB = new UserDB(dbConn);
+var mailer = new MailerService(mailProvider);
+var marketing = new MarketingService(userDB, mailer);
+#+END_SRC
+
+- Order of method arguments matters, but dependency has no order
+
+*** Spring: Injected fields
+#+BEGIN_SRC java
+record UserDB(@Inject DatabaseConnection conn); 
+// [...]
+#+END_SRC
+
+Composability
+- Two instances of the same type?
+- Dynamically created instances?
+- Non-singleton instances?
+
+Discoverability
+- Initialization order?
