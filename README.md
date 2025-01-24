@@ -2,8 +2,7 @@
 
 This contains a presentation about [Lazagna](https://github.com/jypma/lazagna/), a web-based UI framework built with ScalaJS on ZIO.
 
-Everything in this repository is covered under the
-[Creative Commons Attribution-ShareAlike 4.0 International License][http://creativecommons.org/licenses/by-sa/4.0/].
+Everything in this repository is covered under the [CC BY-SA 4.0](http://creativecommons.org/licenses/by-sa/4.0/) license.
 
 In addition, any source source examples are licensed under the [MIT License](https://mit-license.org/).
 
