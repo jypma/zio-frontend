@@ -8,7 +8,13 @@
 * Introduction
 ** Agenda
 
-- Many thanks to [[https://laminar.dev/][Laminar]], the awesome (Scala but non-ZIO) frontend framework that inspired this work.
+   - Computations as values
+   - Demo part 1
+   - Introducing ZIO and Lazagna
+   - Application architecture
+   - Demo part 2
+   
+ /Many thanks to [[https://laminar.dev/][Laminar]], the awesome (Scala but non-ZIO) frontend framework that inspired this work./
 ** Evaluating language and framework alternatives
 - Subjective maintainability concerns
   * Discoverability
@@ -206,6 +212,8 @@ object ZIO {
 We can now declare =Scope= as a dependency to state that a =ZIO= requires scope handling and cleanup after it's been run, e.g.:
 
 #+BEGIN_SRC scala
+def openFile(name: String): ZIO[Scope, FileError, File] = /* ... */
+
 ZIO.scoped {
   openFile(name).flatMap(useFile)
 }
@@ -328,7 +336,97 @@ div(
 )
 #+END_SRC
 
-* Cross-cutting concerns
+** Dynamic child nodes
+We don't want to replace collections of DOM nodes whenever a collection changes, so let's start with only modeling differences.
+#+BEGIN_SRC scala
+sealed trait ChildOp
+case class Append[E <: dom.Element](elmt: Modifier[E]) extends ChildOp
+case class InsertOrMove[E1 <: dom.Element, E2 <: dom.Element](elmt: Modifier[E1], after: Modifier[E2]) extends ChildOp
+case class Delete[E <: dom.Element](elmt: Modifier[E]) extends ChildOp
+
+
+object Children {
+  def <~~(content: Consumable[ChildOp]): Modifier = /* ... */
+}
+#+END_SRC
+
+This allows us to now write a simple chat room view:
+#+BEGIN_SRC scala
+val incomingMessages: ZStream[Any, Nothing, String] = /* ... */
+
+div(
+  cls := "chat-messages",
+  children <~~ incomingMessages.map { body =>
+    Append(
+      div(
+        cls := "chat-message",
+        textContent := body
+      )
+    )
+  }
+)
+#+END_SRC
+   
+* Demo application
+** Event sourcing
+#+BEGIN_SRC plantuml :file eventsourcing.svg :hidden
+skinparam dpi 150
+skinparam BackgroundColor #C1C1A2
+' partition "name" for sequence diagrams
+package "backend" {
+cloud Server
+}
+package "frontend" {
+circle Client1
+circle Client2
+circle Client3
+}
+Server --> Client1: events
+Server --> Client2: events
+Server --> Client3: events
+Client1 -> Server: commands
+
+#+END_SRC
+
+#+ATTR_HTML: :width 80%
+#+RESULTS:
+[[file:eventsourcing.svg]]
+- Events are the source of truth
+- All state is materialized from events
+** Interactive whiteboard
+/Concept/ (we've all seen it)
+
+- Browser window is a canvas to draw on
+- Typically a mix of structured and non-structured drawing elements
+- People can see what others are drawing in real time
+
+/Strategy/
+
+- Server component to store and broadcast events (and to receive commands)
+- Frontend renderer to turn events into UI elements
+- Let's use the browser's SVG support
+** Application components
+   - *Backend*
+     + Provides storage (Cassandra) to write and read the /event/ journal
+     + Provides REST API (and web socket) to receive /commands/
+     + User management and validation
+   - *Frontend*
+     + Reads events from a web socket
+     + Caches events in IndexedDB
+     + Renders UI directly from events
+     + User actions send commands to server 
+   - *Shared code*
+     + Event to state materialization
+* Selected use cases
+** TODO Data binding of active tool in a toolbar
+
+** TODO Context-sensitive keyboard shortcut display
+
+** TODO Background rendering of incremental search result
+
+* TODO Conclusion
+
+* Extra information
 ** Dependencies
 *** Description
 Dependencies is ...
