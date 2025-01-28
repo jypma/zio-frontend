@@ -15,9 +15,11 @@
    - Demo part 2
    
  /Many thanks to [[https://laminar.dev/][Laminar]], the awesome (Scala but non-ZIO) frontend framework that inspired this work./
-** Evaluating language and framework alternatives
+** TODO Evaluating language and framework alternatives
+/How I evaluate software architectures/
+
 - Subjective maintainability concerns
-  * Discoverability
+  * Comprehensability
   * Composability
   * Concurrency
 
@@ -90,10 +92,10 @@ public void <T extends Edible & Fruit> eat(T tasty) {}
 * Computations as values
 ** Introduction
 - /Functional/ programming deals with functions as first-class citizens
-- Lets try to define a computation (a function) as a value
+- Let's try to define a computation (a function) as a value
   * Calculates some result =A= (...eventually)
 
-In psuedo-Java, our definition might look like
+In (pseudo) Java, our definition might look like
 #+BEGIN_SRC java
 /** A computation that eventually results in a value, when launched */
 interface Comp<A> {
@@ -102,12 +104,22 @@ interface Comp<A> {
 #+END_SRC
 
 ** Function transformation
-Given that we now have a
+We can define methods that /alter/ a computation in a generic way, e.g.
+#+BEGIN_SRC java
+interface Comp<A> { /* ... */
+    /** Returns a computation that waits [millis], and then runs this computation */
+    Comp<A> delay(int millis);
+    /** Returns a computation that repeats this computation [times], returning the last result */
+    Comp<A> repeat(int times);
+}
+#+END_SRC
+
+Given that we have a behavior:
 #+BEGIN_SRC java
 Comp<Int> createUserInDB = /* ... */ ;
 #+END_SRC
 
-We can define methods on =Comp= that create new functions which augment the behavior, e.g.
+We can define new computations which augment that behavior, e.g.
 #+BEGIN_SRC java
 Comp<Int> create3Users = createUserInDB.repeat(3);
 Comp<Int> waitAndThenCreateUser = createUserInDB.delay(1000);
@@ -118,6 +130,10 @@ Comp<Int> createUsersSlowly = createUserInDB.delay(1000).repeat(5);
 - Let's extend our definition so it can use some dependencies
   * Depends on some input type =R=
 #+BEGIN_SRC java
+/**
+ * @param R The dependencies for this computation (input)
+ * @param A The result of this computation (output)
+ */
 interface Comp<R,A> {
     CompletionStage<A> go(R dependencies);
 }
@@ -132,7 +148,11 @@ interface Comp<R,A> {
   * (B) Unexpected defects (e.g. division by zero, null pointer)
   * (C) Fatal errors (e.g. we've ran out of memory)
 
-- Let's model expected failures as an explicit type =E=, and keep defects as (unchecked) exceptions.
+- Let's handle these classes separately:
+  * (A) We model expected failures as an explicit error type =E=
+  * (B) Defects are (unchecked) exceptions.
+  * (C) On fatal errors we attempt to shut down this JVM
+
 #+BEGIN_SRC java
 interface Comp<R,E,A> {
     CompletionStage<Either<E,A>> go(R dependencies);
@@ -142,11 +162,44 @@ interface Comp<R,E,A> {
 
 - Define methods on =Comp= that handle (expected) failure:
 #+BEGIN_SRC java
+interface Comp<R,E,A> {
+    /** Returns a computation that doesn't (expectedly) fail, by calling the given function to transform errors into a result. */
+    Comp<R,Nothing,A> catchAll(Function<E,A> lambda);
+}
+
 Comp<Any,DBError,User> fetchUser = getUser(42);
+
 Comp<Any,Nothing,User> fetchOrDefault = fetchUser.catchAll(error -> createDefaultUser());
 #+END_SRC
 
-** Chaining our function type
+** Chaining our computation type
+What if we want to invoke other functions, or more computations, after ours completes?
+
+- Let's define =map= and =flatMap= for our =Comp= type.
+#+BEGIN_SRC java
+interface Comp<R,E,A> {
+    /** Returns a computation that invokes the given function on the successful result of this computation */
+    <B> Comp<R,E,B> map(Function<A,B> fn);
+
+    /** Returns a computation that invokes the given computation after the successful result of this computation, using its result */
+    <B> Comp<R,E,B> flatMap(Function<A,Comp<R,E,B>> fn);
+}
+#+END_SRC
+
+- But we don't have to stop there. Since =Comp= is asynchronous, we can also define operators like:
+#+BEGIN_SRC java
+interface Comp<R,E,A> {
+    /** Returns a computation that runs the given computation after this one, and combines the results */
+    <B,T> Comp<R,E,T> zip(Comp<R,E,B> that, BiFunction<A,B,T> combine);
+    /** Returns a computation that runs the given computation concurrently with this one, and combines the results */
+    <B,T> Comp<R,E,T> zipPar(Comp<R,E,B> that, BiFunction<A,B,T> combine);
+    /** Returns a computation that runs the given computation concurrently with this one, returning whichever succeeds first */
+    Comp<R,E,A> race(Comp<R,E,A> that);
+}
+#+END_SRC
+
+- Can you spot the missing documentation (or missing defined behavior) above?
+** Chaining with dependencies and errors
 Given our
 #+BEGIN_SRC java
 Comp<DBConnection,DBError,Int> createUserInDB = /* ... */ ;
@@ -159,12 +212,13 @@ Comp<MailConnection,Nothing,Unit> sendSystemMail(String message);
 var res = createUserInDB.flatMap(result -> sendSystemMail("Created user nr. " + result));
 #+END_SRC
 
-What is the expected type for =res='s generic parameters?
+What is the expected type for =res='s =Comp<R,E,A>= generic parameters?
 - /Dependency/: A =DBConnection= and a =MailConnection=, so =DBConnection & MailConnection=
 - /Error/: Either =DBError= or =Nothing=, so =DBError | Nothing=, which simplifies to =DBError=
 - /Result/: =Unit=
 
 For these type calculations, we have to leave Java behind.
+
 ** Introducing the ZIO type
 #+BEGIN_SRC scala
 /** Some example methods in the ZIO trait (with similified signatures) */
@@ -189,7 +243,7 @@ type IO[+E, +A] = ZIO[Any, E, A];
 
 ** Other parts of ZIO
 Besides the =ZIO= type to chain computations and their effects, the ZIO framework also provides
-- Concurrency through the =Fiber= type and =fork= method on =ZIO=
+- Concurrency through the =Fiber= type and =fork= method on =ZIO=, with guaranteed safe cancellation
 - Resource safety using the =Scope= type (as a dependency)
 - Reactive streams using the =ZStream= type
 - Concurrency primitives like queues, semaphores, and atomically mutable references
