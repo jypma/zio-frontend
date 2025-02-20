@@ -14,8 +14,10 @@
    - Application architecture
    - Demo part 2
    
- /Many thanks to [[https://laminar.dev/][Laminar]], the awesome (Scala but non-ZIO) frontend framework that inspired this work./
+/Many thanks to [[https://laminar.dev/][Laminar]], the awesome (Scala but non-ZIO) frontend framework that inspired this work./
 
+This presentation: [[https://github.com/jypma/zio-frontend][https://github.com/jypma/zio-frontend]]
+ 
 * Computations as values
 ** Introduction
 - /Functional/ programming deals with functions as first-class citizens
@@ -30,7 +32,10 @@ interface Comp<A> {
 }
 #+END_SRC
 
-** Function transformation
+Note the following properties:
+- Having an instance of =Comp<A>= does /not/ mean a computation is already in progress
+- We can "launch" the same =Comp<A>= multiple times
+** Transformation
 We can define methods that /alter/ a computation in a generic way, e.g.
 #+BEGIN_SRC java
 interface Comp<A> { /* ... */
@@ -66,26 +71,28 @@ interface Comp<R,A> {
 }
 #+END_SRC
 
-- No dependencies? Use =Any= (Scala equivalent of =java.lang.Object=)
-- Multiple dependencies? Use =R1 & R2= (and some trickery, see ZIO)
+- No dependencies? Use /top/ type (Java: =Object=, Scala: =Any=)
+- Multiple dependencies? Use /intersection/ type, =R1 & R2= (and some trickery, see ZIO)
 
 ** Errors
 - We can define 3 kinds of errors:
-  * (A) Expected failure scenarios (e.g. data didn't validate, or a remote server can't be reached)
-  * (B) Unexpected defects (e.g. division by zero, null pointer)
-  * (C) Fatal errors (e.g. we've ran out of memory)
+  * (1) Expected failure scenarios (e.g. data didn't validate, or a remote server can't be reached)
+  * (2) Unexpected defects (e.g. division by zero, null pointer)
+  * (3) Fatal errors (e.g. we've ran out of memory)
 
 - Let's handle these classes separately:
-  * (A) We model expected failures as an explicit error type =E=
-  * (B) Defects are (unchecked) exceptions.
-  * (C) On fatal errors we attempt to shut down this JVM
+  * (1) We model expected failures as an explicit error type =E=
+  * (2) Defects are (unchecked) exceptions.
+  * (3) On fatal errors we attempt to shut down this JVM
 
+** Errors (contd.)
+Let's add the expected failures (error kind 1) as a type =E=.
 #+BEGIN_SRC java
 interface Comp<R,E,A> {
     CompletionStage<Either<E,A>> go(R dependencies);
 }
 #+END_SRC
-- No expected failure? Use =Nothing= type
+- No expected failure? Use "bottom" type (Scala: =Nothing=)
 
 - Define methods on =Comp= that handle (expected) failure:
 #+BEGIN_SRC java
@@ -97,6 +104,16 @@ interface Comp<R,E,A> {
 Comp<Any,DBError,User> fetchUser = getUser(42);
 
 Comp<Any,Nothing,User> fetchOrDefault = fetchUser.catchAll(error -> createDefaultUser());
+#+END_SRC
+
+- Similar operators can be defined for error kind 2 (unchecked exceptions)
+** Bonus: "Either" type
+An instance is /either/ the left type, or the right type. Typically left means an error, and right means success.
+#+BEGIN_SRC java
+sealed interface Either<L,R> {
+    record Left<L,R>(L left) implements Either<L,R> {}
+    record Right<L,R>(R right) implements Either<L,R> {}
+}
 #+END_SRC
 
 ** Chaining our computation type
@@ -113,13 +130,16 @@ interface Comp<R,E,A> {
 }
 #+END_SRC
 
+** Chaining our computation type (contd.)
 - But we don't have to stop there. Since =Comp= is asynchronous, we can also define operators like:
 #+BEGIN_SRC java
 interface Comp<R,E,A> {
     /** Returns a computation that runs the given computation after this one, and combines the results */
     <B,T> Comp<R,E,T> zip(Comp<R,E,B> that, BiFunction<A,B,T> combine);
+
     /** Returns a computation that runs the given computation concurrently with this one, and combines the results */
     <B,T> Comp<R,E,T> zipPar(Comp<R,E,B> that, BiFunction<A,B,T> combine);
+
     /** Returns a computation that runs the given computation concurrently with this one, returning whichever succeeds first */
     Comp<R,E,A> race(Comp<R,E,A> that);
 }
@@ -147,8 +167,8 @@ What is the expected type for =res='s =Comp<R,E,A>= generic parameters?
 For these type calculations, we have to leave Java behind.
 
 ** Introducing the ZIO type
+A =ZIO= can perform a calculation, given dependencies =R=, resulting in an error =E= or a success =A=.
 #+BEGIN_SRC scala
-/** Some example methods in the ZIO trait (with similified signatures) */
 trait ZIO[-R, +E, +A] {
   def repeat(N: Int): ZIO[R, E, A]
   def delay(d: Duration): ZIO[R, E, A]
@@ -169,17 +189,23 @@ type IO[+E, +A] = ZIO[Any, E, A];
 - For comprehension over =map=, =flatMap= and =filter=
 
 ** Other parts of ZIO
-Besides the =ZIO= type to chain computations and their effects, the ZIO framework also provides
+Besides the =ZIO= type to chain computations and their effects, the ZIO framework also provides:
+
 - Concurrency through the =Fiber= type and =fork= method on =ZIO=, with guaranteed safe cancellation
+
 - Resource safety using the =Scope= type (as a dependency)
-- Reactive streams using the =ZStream= type
+
+- Reactive streams using the =ZStream= type: A reactive stream that, given dependency =R=, can fail with =E= or yield zero or more =A=
+#+BEGIN_SRC scala
+trait ZStream[-R, +E, +A]
+#+END_SRC
+
 - Concurrency primitives like queues, semaphores, and atomically mutable references
   + =SubscriptionRef= stores a value, with the ability to get a =ZStream= of changes to it
 
 ** Resource safety: Scope
 - We want to make sure that resources are closed after they're done being used
 - /If only we could express that an effect should only run when these dependencies are met.../
-
 #+BEGIN_SRC scala
 trait zio.Scope { /* ... */ }
 
@@ -206,9 +232,11 @@ However, since =Scope= is a normal type, we can explicitly use it like we would 
 ** Demo 1
 ** Introduction
 Let's build a frontend framework. What do we need?
+
 - A building block to define modifications we want to make to the DOM tree
   + Adding (and removing?) elements
   + Adding event handlers
+
 - Nice ways to integrate non-UI functionality in the same framework
   + REST requests
   + Web sockets
@@ -220,12 +248,15 @@ We have the following available:
 ** The not-so-virtual DOM
 - Once upon a time. there was the DOM (/document object model/)
   + Contains all the pretty =<div>=, and how they're centered
+
 - Generally good idea: let's make UI state a pure function from our application state
   + =ApplicationState -> HTML=
   + Replacing large parts of HTML with the same HTML makes rendering slow
   + DOM updates /themselves/ are not slow
+
 - Solution (=react=, =vue=, ...): Render to a "virtual" DOM, and only apply differences
   + Leaky: there's state inside those HTML components (e.g. input, focus, ...)
+
 - Let's instead try to just not update what we're not changing
 ** Our building block
 Let's define an operation that can perform a change at a certain point (parent) in the DOM tree.
@@ -284,12 +315,13 @@ To make our applications interactive, we want to be able to run a =ZIO= when an 
 #+BEGIN_SRC scala
 case class EventsEmitter[E <: dom.Event, +T](name:String /*, ... */) {
   def apply[U](op: ZIO[Scope, Nothing, T] => ZIO[Scope, Nothing, U]): EventsEmitter[E,U] = /* ... */
+  def run: Modifier[Unit] = /* ... */
 }
 val onClick = EventsEmitter[dom.MouseEvent]("click")
 
 div(
   div(
-    input(typ := "button", title := "OK", onClick(_.map(ev => println(ev))),
+    input(typ := "button", title := "OK", onClick(_.map(ev => println(ev))).run),
     input(typ := "button", title := "Cancel")
   )
 )
@@ -369,7 +401,7 @@ Client1 -> Server: commands
 
 #+END_SRC
 
-#+ATTR_HTML: :width 80%
+#+ATTR_HTML: :width 40%
 #+RESULTS:
 [[file:eventsourcing.svg]]
 - Events are the source of truth
@@ -415,9 +447,9 @@ trait DrawingTools {
 
 Now, in its implementation, let's have a =SubscriptionRef= maintain the current tool:
 #+BEGIN_SRC scala
-val availableTools: Seq[Tool] = ???
+val pencilTool: Tool = /* ... */
 val implDrawingTools = for {
-  selectedTool <- SubscriptionRef.make(availableTools.head)
+  selectedTool <- SubscriptionRef.make(pencilTool)
 } yield new DrawingTools {
   override def renderCurrentTool = Alternative.mountOne(selectedTool)(_.render)
 }
@@ -489,20 +521,18 @@ for {
   val selectDialog = dialogs.child { close =>
     div(cls := "dialog",
       div(cls := "results",
-        s.symbols.map { symbol =>
-          svg(
-            cls := "result",
-            use(
-              svgTitle(textContent := symbol.name),
-              href := symbol.href,
-              cls := "icon",
-              width := 24,
-              height := 24
-            ),
-            onClick.merge(onKeyDown(_.filter(_.key == "Enter")))(_.flatMap { _ =>
-              props.update(_.copy(icon = symbol)) *> close
-            })
-          )
+        Alternative.mountOneForked(searchResult) { s =>
+          s.symbols.map { symbol =>
+            svg(
+              cls := "result",
+              use(cls := "icon",
+                href := symbol.href,
+              ),
+              onClick.merge(onKeyDown(_.filter(_.key == "Enter")))(_.flatMap { _ =>
+                props.update(_.copy(icon = symbol)) *> close
+              })
+            )
+          }
         }
       ),
       div(cls := "query",
