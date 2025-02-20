@@ -15,79 +15,6 @@
    - Demo part 2
    
  /Many thanks to [[https://laminar.dev/][Laminar]], the awesome (Scala but non-ZIO) frontend framework that inspired this work./
-** TODO Evaluating language and framework alternatives
-/How I evaluate software architectures/
-
-- Subjective maintainability concerns
-  * Comprehensability
-  * Composability
-  * Concurrency
-
-- Cross-cutting concerns
-  * Handling of dependencies
-  * Guarantees regarding resource safety
-  * Error visibility, handling and retry
-
-* Prelude: type algebra
-
-** Unit type
-/The type that is a supertype of all other types/
-
-- Java (partially): =void= (but only as keyword, the =Void= type is problematic)
-- Typescript: =void=
-- Scala, Kotlin: =Unit=
-- Exactly one value exists for this type
-- Used to mark methods that only return, without any additional information
-
-** Nothing type ("Bottom" type)
-/The type that is a subtype of all other types/
-
-- Scala 3, Kotlin: =Nothing=, Typescript: =never=
-- No values exist for this type
-- Used to mark methods that are guaranteed never to return
-#+BEGIN_SRC scala
-def notImplemented: Nothing = throw new RuntimeException("Not yet implemented!")
-
-def theAnswerToLifeTheUniverseAndEverything: Int = {
-  notImplemented
-}
-#+END_SRC
-
-** Union types
-/The collection of objects that have either type/ =A= /or type/ =B= /(or both)/
-
-- Scala 3 and Typescript: =A | B=
-- No syntax exists for this in Java (or Kotlin)
-- The concept exists though:
-#+BEGIN_SRC java
-public void readStuff() throws IOException;
-public void hangOut() throws InterruptedException();
-
-public void unfortunateMethod() throws IOException, InterruptedException { // <-- Union type
-    hangOut();
-    readStuff();
-}
-#+END_SRC
-- Nice properties, e.g.:
-  + =(A | B) | C= is the same as =(A | C) | B=
-  + =(A | A)= is just =A=
-  + =(A | Nothing)= is =A= 
-
-** Intersection types
-/The collection of objects that have both type/ =A= /and type/ =B=
-
-- Scala 3 and Typescript: =A & B=
-- No direct syntax exists for this in Java (or Kotlin)
-- Can be expressed as a generic type bound (but only extending concrete types)
-#+BEGIN_SRC java
-interface Edible {}
-interface Fruit {}
-public void <T extends Edible & Fruit> eat(T tasty) {}
-#+END_SRC
-- Similarly nice properties, e.g.
-  + =(A & B) | C= is the same as =(A & C) & B=
-  + =(A & A)= is just =A=
-  + =(A & Any)= is =A=
 
 * Computations as values
 ** Introduction
@@ -276,6 +203,7 @@ ZIO.scoped {
 However, since =Scope= is a normal type, we can explicitly use it like we would any other dependency.
 
 * Moving into front-end land
+** Demo 1
 ** Introduction
 Let's build a frontend framework. What do we need?
 - A building block to define modifications we want to make to the DOM tree
@@ -398,7 +326,6 @@ case class Append[E <: dom.Element](elmt: Modifier[E]) extends ChildOp
 case class InsertOrMove[E1 <: dom.Element, E2 <: dom.Element](elmt: Modifier[E1], after: Modifier[E2]) extends ChildOp
 case class Delete[E <: dom.Element](elmt: Modifier[E]) extends ChildOp
 
-
 object Children {
   def <~~(content: Consumable[ChildOp]): Modifier = /* ... */
 }
@@ -472,14 +399,262 @@ Client1 -> Server: commands
    - *Shared code*
      + Event to state materialization
 * Selected use cases
-** TODO Data binding of active tool in a toolbar
+** Data binding of active tool in a toolbar
+*** Definition
+Our drawing tools have a name, description, and a way to render extra DOM elements (tool settings)
+#+BEGIN_SRC scala
+case class Tool(key: String, name: String, hint: String, icon: String, render: Modifier[Unit])
+#+END_SRC
 
-** TODO Context-sensitive keyboard shortcut display
+Let's define a =trait= that would render (and replace if needed) the current tool's settings
+#+BEGIN_SRC scala
+trait DrawingTools {
+  def renderCurrentTool: Modifier[Unit]
+}
+#+END_SRC
 
-** TODO Background rendering of incremental search result
+Now, in its implementation, let's have a =SubscriptionRef= maintain the current tool:
+#+BEGIN_SRC scala
+val availableTools: Seq[Tool] = ???
+val implDrawingTools = for {
+  selectedTool <- SubscriptionRef.make(availableTools.head)
+} yield new DrawingTools {
+  override def renderCurrentTool = Alternative.mountOne(selectedTool)(_.render)
+}
+#+END_SRC
 
-* TODO Conclusion
+- =Alternative.mountOne= will read from a stream of values, re-rendering a =Modifier= whenever a new element arrives
+- A =Scope= is maintained for each render, so any old resources are safely removed
 
+** Internals: =Children=
+We want to add a =Modifier= to an arbitrary parent, but bind its lifetime to an arbitrary =Scope=.
+#+BEGIN_SRC scala
+trait Children {
+  /** Renders the children into their actual location. This must be invoked before .child() has any effect. */
+  def render: Modifier[Unit]
+
+  /** Returns a ZIO that adds a child, inserting it where [render] was invoked. */
+  def child[E <: dom.Element](creator: UIO[Unit] => Element[E]): ZIO[Scope, Nothing, Unit]
+}
+object Children {
+  def make: UIO[Children]
+}
+#+END_SRC
+
+- =children.render= provides a =Modifier= that can dynamically show added children (e.g. a menu bar, tool box, etc.)
+- =children.child= adds a child to where =render= was invoked. When the =Scope= on which =child= was ran ends, the child is removed.
+- =creator='s =UIO[Unit]= argument is a =destroy= hook, which the child itself can invoke to remove itself early.
+** Context-sensitive keyboard shortcut display
+Let's display keyboard shortcut hints, which are also clickable.
+#+BEGIN_SRC scala
+trait DrawingTools {
+  def renderKeyboardDisplay: Modifier[dom.Element]
+}
+#+END_SRC
+
+We'll collect all of the keyboard hints into a global  =<div>= element.
+#+BEGIN_SRC scala
+val keyboardDisplay = div(cls := "keyboard-hints", drawingTools.renderKeyboardDisplay)
+#+END_SRC
+
+Let's make use of the =Children= helper, so we can have =SelectTool= define keyboard hints that are visible whenever the tool itself is rendered.
+#+BEGIN_SRC scala
+val implDrawingTools = for {
+  selectedTool <- SubscriptionRef.make(availableTools.head)
+  keyboardHints <- Children.make
+  selectTool <- SelectTool.make(keyboardHints)
+  availableTools = Seq(selectTool /*, ... */)
+} yield new DrawingTools {
+  override def renderCurrentTool = Alternative.mountOne(selectedTool)(_.render)
+  override def renderHints = div(keyboardHints.render)
+}
+#+END_SRC
+
+** Background rendering of incremental search result
+We'll have many (100's) of search results on our icons, let's display them incrementally as we type.
+
+Our =Index= has an in-memory index that can provide direct results, but we still have to create an SVG icon tag for each one.
+
+#+BEGIN_SRC scala
+case class Result(completions: Seq[String], symbols: Seq[SymbolRef])
+trait Index {
+  def lookup(text: String): UIO[Result]
+}
+val dialogs: Children = ???
+val index: Index = ???
+
+for {
+  searchResult <- Hub.bounded[Result](1)
+} yield {
+  val selectDialog = dialogs.child { close =>
+    div(cls := "dialog",
+      div(cls := "results",
+        s.symbols.map { symbol =>
+          svg(
+            cls := "result",
+            use(
+              svgTitle(textContent := symbol.name),
+              href := symbol.href,
+              cls := "icon",
+              width := 24,
+              height := 24
+            ),
+            onClick.merge(onKeyDown(_.filter(_.key == "Enter")))(_.flatMap { _ =>
+              props.update(_.copy(icon = symbol)) *> close
+            })
+          )
+        }
+      ),
+      div(cls := "query",
+        input(typ := "text", placeholder := "Search icon...",
+          onInput.asTargetValue(_.flatMap { text =>
+            index.lookup(text).flatMap(searchResult.publish)
+          })
+        ),
+      )
+    )
+  }
+}
+#+END_SRC
+
+
+** Internals: =Alternative.mountOne=
+Let's define a =Modifier= that (re-)renders itself according to a changing set of values of type =T=.
+
+A simplified implementation:
+#+BEGIN_SRC scala
+object Alternative {
+  /** Selects from a potentially unlimited lists of alternative renders, based on an element T. Whenever the
+    * stream pushes a new T, the current render is fully replaced if T has changed.
+    *
+    * Renders are made on the current fiber.
+    *
+    * Renders of previous elements are discarded. */
+  def mountOne[T](source: Consumeable[T])(render: T => Modifier[Any]): Modifier[Unit] = {
+    case class State(t: T, scope: Scope.Closeable)
+
+    for {
+      current <- ZIO.acquireRelease(Ref.make[Option[State]](None))(_.get.flatMap(_.map(_.scope.close(Exit.unit)).getOrElse(ZIO.unit)))
+      res <- Modifier { parent =>
+        source.changes
+          .map { t => (t, render(t)) }
+          .mapZIO { (t, rendered) =>
+            for {
+              state <- current.get
+              _ <- state.map(_.scope.close(Exit.unit)).getOrElse(ZIO.unit)
+              newScope <- Scope.make
+              _ <- Setup.start(rendered.provideSome[Setup](ZLayer.succeed(newScope), ZLayer.succeed(MountPoint(parent))))
+              _ <- current.set(Some(State(t, newScope)))
+            } yield ()
+          }
+          .consume
+      }
+    } yield res
+  }
+}
+#+END_SRC
+** Internals: =Alternative.mountOneForked=
+Our implementation of =mountOne= will block the current fiber until a new =T= has finished rendering.
+
+Let's do that in the background instead, cancelling our render if a new element comes in early.
+#+BEGIN_SRC scala
+object Alternative {
+  /** Selects from a potentially unlimited lists of alternative renders, based on an element T. Whenever the
+    * stream pushes a new T, the current render is fully replaced if T has changed.
+    *
+    * A new fiber is forked for each render, so that it can be aborted if a new element comes in while
+    * rendering is in progress.
+    *
+    * Renders of previous elements are discarded. */
+  def mountOneForked[T](source: Consumeable[T])(render: T => Modifier[Any]): Modifier[Unit] = {
+    Alternative.mountOne(source)(render.andThen { modifier =>
+      for {
+        scope <- ZIO.scope
+        fiber <- modifier.forkIn(scope)
+      } yield ()
+    })
+  }
+}
+#+END_SRC
+
+* Conclusion
+
+- /Computations as values/ as a style elegantly covers a variety of concerns:
+  + Asynchronous dependency injection
+  + Asynchronous resource safety
+  + Resource-safe background processing with cancellation
+  + Error classification and guaranteed failure handling
+
+- Using a language's existing type system means the compiler can give very early feedback
+
+- Want to try it out?
+  + ZIO: [[https://zio.dev/][https://zio.dev/]]
+  + Lazagna: [[https://github.com/jypma/lazagna/][https://github.com/jypma/lazagna/]]
+  + Draw application: [[https://github.com/jypma/draw][https://github.com/jypma/draw]]
+  + JIO (Java-only ZIO...): [[https://github.com/jypma/jio][https://github.com/jypma/jio]]
+
+- ZIO-like implementations do exist for your favorite language (I've seen attempts in Kotlin, Typescript, and Rust)
+  + Typically held back by the limitations and soundness of that specific language's type system
+* Bonus: Type algebra
+
+** Unit type
+/The type that is a supertype of all other types/
+
+- Java (partially): =void= (but only as keyword, the =Void= type is problematic)
+- Typescript: =void=
+- Scala, Kotlin: =Unit=
+- Exactly one value exists for this type
+- Used to mark methods that only return, without any additional information
+
+** Nothing type ("Bottom" type)
+/The type that is a subtype of all other types/
+
+- Scala 3, Kotlin: =Nothing=, Typescript: =never=
+- No values exist for this type
+- Used to mark methods that are guaranteed never to return
+#+BEGIN_SRC scala
+def notImplemented: Nothing = throw new RuntimeException("Not yet implemented!")
+
+def theAnswerToLifeTheUniverseAndEverything: Int = {
+  notImplemented
+}
+#+END_SRC
+
+** Union types
+/The collection of objects that have either type/ =A= /or type/ =B= /(or both)/
+
+- Scala 3 and Typescript: =A | B=
+- No syntax exists for this in Java (or Kotlin)
+- The concept exists though:
+#+BEGIN_SRC java
+public void readStuff() throws IOException;
+public void hangOut() throws InterruptedException();
+
+public void unfortunateMethod() throws IOException, InterruptedException { // <-- Union type
+    hangOut();
+    readStuff();
+}
+#+END_SRC
+- Nice properties, e.g.:
+  + =(A | B) | C= is the same as =(A | C) | B=
+  + =(A | A)= is just =A=
+  + =(A | Nothing)= is =A=
+
+** Intersection types
+/The collection of objects that have both type/ =A= /and type/ =B=
+
+- Scala 3 and Typescript: =A & B=
+- No direct syntax exists for this in Java (or Kotlin)
+- Can be expressed as a generic type bound (but only extending concrete types)
+#+BEGIN_SRC java
+interface Edible {}
+interface Fruit {}
+public void <T extends Edible & Fruit> eat(T tasty) {}
+#+END_SRC
+- Similarly nice properties, e.g.
+  + =(A & B) | C= is the same as =(A & C) & B=
+  + =(A & A)= is just =A=
+  + =(A & Any)= is =A=
 * Extra information
 ** Dependencies
 *** Description
@@ -519,7 +694,7 @@ var marketing = new MarketingService(userDB, mailer);
 
 *** Spring: Injected fields
 #+BEGIN_SRC java
-record UserDB(@Inject DatabaseConnection conn); 
+record UserDB(@Inject DatabaseConnection conn);
 // [...]
 #+END_SRC
 
